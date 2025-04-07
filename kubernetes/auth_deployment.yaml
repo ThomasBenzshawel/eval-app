@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: objaverse-auth
+  labels:
+    app: objaverse-auth
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: objaverse-auth
+  template:
+    metadata:
+      labels:
+        app: objaverse-auth
+    spec:
+      containers:
+      - name: objaverse-auth
+        image: your-docker-username/objaverse-auth:latest
+        ports:
+        - containerPort: 4000
+        env:
+        - name: MONGO_URI
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: mongo-uri
+        - name: AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: auth-secret
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "384Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"

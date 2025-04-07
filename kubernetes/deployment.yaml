@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: objaverse-web
+  labels:
+    app: objaverse-web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: objaverse-web
+  template:
+    metadata:
+      labels:
+        app: objaverse-web
+    spec:
+      containers:
+      - name: objaverse-web
+        image: your-docker-username/objaverse-web:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: MONGO_URI
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: mongo-uri
+        - name: CLOUDINARY_CLOUD_NAME
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: cloudinary-cloud-name
+        - name: CLOUDINARY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: cloudinary-api-key
+        - name: CLOUDINARY_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: cloudinary-api-secret
+        - name: AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: objaverse-secrets
+              key: auth-secret
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
