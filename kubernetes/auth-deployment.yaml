@@ -16,20 +16,22 @@ spec:
     spec:
       containers:
       - name: objaverse-auth
-        image: your-docker-username/objaverse-auth:latest
+        image: your-docker-username/objaverse-auth-python:latest
         ports:
         - containerPort: 4000
         env:
+        - name: PORT
+          value: "4000"
         - name: MONGO_URI
           valueFrom:
             secretKeyRef:
               name: objaverse-secrets
               key: mongo-uri
-        - name: AUTH_SECRET
+        - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
               name: objaverse-secrets
-              key: auth-secret
+              key: jwt-secret
         resources:
           limits:
             cpu: "300m"
@@ -37,3 +39,9 @@ spec:
           requests:
             cpu: "100m"
             memory: "128Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 4000
+          initialDelaySeconds: 30
+          periodSeconds: 10

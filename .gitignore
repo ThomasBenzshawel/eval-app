@@ -1,1 +1,4 @@
 kubernetes/secrets.yaml
+auth-service/.env
+.gitignore
+web-service/.env

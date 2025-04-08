@@ -1,3 +1,4 @@
+# deployment.yaml - Main web service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,10 +17,12 @@ spec:
     spec:
       containers:
       - name: objaverse-web
-        image: your-docker-username/objaverse-web:latest
+        image: your-docker-username/objaverse-web-python:latest
         ports:
         - containerPort: 3000
         env:
+        - name: PORT
+          value: "3000"
         - name: MONGO_URI
           valueFrom:
             secretKeyRef:
@@ -40,11 +43,11 @@ spec:
             secretKeyRef:
               name: objaverse-secrets
               key: cloudinary-api-secret
-        - name: AUTH_SECRET
+        - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
               name: objaverse-secrets
-              key: auth-secret
+              key: jwt-secret
         resources:
           limits:
             cpu: "500m"
