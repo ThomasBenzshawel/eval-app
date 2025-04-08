@@ -1,6 +1,3 @@
-# Install required packages
-# pip install fastapi uvicorn pymongo python-multipart python-dotenv pydantic httpx cloudinary
-
 import os
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Header
 from fastapi.middleware.cors import CORSMiddleware

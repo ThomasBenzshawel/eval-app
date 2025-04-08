@@ -1,6 +1,3 @@
-# Install required packages
-# pip install fastapi uvicorn pymongo python-jose[cryptography] passlib[bcrypt] pydantic python-dotenv python-multipart
-
 import os
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
