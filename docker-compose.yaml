@@ -1,8 +1,8 @@
-version: '3'
-
 services:
+  # MongoDB service (for local development)
   mongodb:
     image: mongo:latest
+    container_name: objaverse-mongodb
     environment:
       - MONGO_INITDB_ROOT_USERNAME=admin
       - MONGO_INITDB_ROOT_PASSWORD=password
@@ -10,36 +10,82 @@ services:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+      - ./mongodb_data:/data/db  
+    networks:
+      - objaverse-network
 
-  web:
-    build: ./web-service
-    depends_on:
-      - mongodb
-      - auth
-    environment:
-      - PORT=3000
-      - MONGO_URI=mongodb://admin:password@mongodb:27017/objaverse?authSource=admin
-      - CLOUDINARY_CLOUD_NAME=your-cloud-name
-      - CLOUDINARY_API_KEY=your-api-key
-      - CLOUDINARY_API_SECRET=your-api-secret
-      - JWT_SECRET=your-jwt-secret
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./web-service:/app
-
-  auth:
-    build: ./auth-service
+  # Authentication service
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: objaverse-auth
     depends_on:
       - mongodb
     environment:
       - PORT=4000
       - MONGO_URI=mongodb://admin:password@mongodb:27017/objaverse-auth?authSource=admin
-      - JWT_SECRET=your-jwt-secret
+      - JWT_SECRET=your-secure-random-jwt-secret
     ports:
       - "4000:4000"
     volumes:
       - ./auth-service:/app
+      - /app/node_modules
+    networks:
+      - objaverse-network
+    restart: unless-stopped
+
+  # Web API service
+  web-service:
+    build:
+      context: ./web-service
+      dockerfile: Dockerfile
+    container_name: objaverse-web
+    depends_on:
+      - mongodb
+      - auth-service
+    environment:
+      - PORT=3000
+      - MONGO_URI=mongodb://admin:password@mongodb:27017/objaverse?authSource=admin
+      - AUTH_SERVICE_URL=http://auth-service:4000
+      - CLOUDINARY_CLOUD_NAME=objaverse-kedziora
+      - CLOUDINARY_API_KEY=316816699942876
+      - CLOUDINARY_API_SECRET=h9-WpLDzxJNjlOx0ldlwSjQLytk
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web-service:/app
+      - /app/node_modules
+    networks:
+      - objaverse-network
+    restart: unless-stopped
+
+  # Evaluator portal frontend
+  evaluator_portal:
+    build:
+      context: ./evaluator_portal
+      dockerfile: Dockerfile
+    container_name: objaverse-portal
+    depends_on:
+      - web-service
+      - auth-service
+    environment:
+      - PORT=8000
+      - API_URL=http://web-service:3000
+      - AUTH_URL=http://auth-service:4000
+      - JWT_SECRET=your-secure-random-jwt-secret
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./evaluator_portal:/app
+      - /app/node_modules
+    networks:
+      - objaverse-network
+    restart: unless-stopped
+
+networks:
+  objaverse-network:
+    driver: bridge
 
 volumes:
   mongodb_data:

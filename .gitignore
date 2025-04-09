@@ -3,3 +3,4 @@ auth-service/.env
 .gitignore
 web-service/.env
 auth-service/secret_gen.py
+mongodb_data/
