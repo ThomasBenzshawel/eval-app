@@ -7,9 +7,11 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 from dotenv import load_dotenv
+from fastapi import Header
+
 
 # Load environment variables
 load_dotenv()
@@ -35,13 +37,16 @@ SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")  
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Pydantic Models
 class UserBase(BaseModel):
     email: str
-    role: str = "researcher"  # Default role
+    role: str = "researcher"  # Default role or can be set to "admin"
 
 class UserCreate(UserBase):
     password: str
@@ -80,9 +85,9 @@ def get_password_hash(password):
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+        expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -107,7 +112,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     session = db.sessions.find_one({
         "sessionId": sessionId,
         "isValid": True,
-        "expiresAt": {"$gt": datetime.utcnow()}
+        "expiresAt": {"$gt": datetime.now(timezone.utc)}
     })
     if session is None:
         raise credentials_exception
@@ -136,8 +141,17 @@ async def health_check():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+#check if a user is an admin
+async def check_admin_user(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required"
+        )
+    return current_user
+
 @app.post("/register", response_model=dict)
-async def register(user_data: UserCreate):
+async def register(user_data: UserCreate, admin_user: dict = Depends(check_admin_user)):
     # Check if user exists
     existing_user = db.users.find_one({"email": user_data.email})
     if existing_user:
@@ -152,13 +166,50 @@ async def register(user_data: UserCreate):
         "email": user_data.email,
         "password": hashed_password,
         "role": user_data.role,
-        "createdAt": datetime.utcnow()
+        "createdAt": datetime.now(timezone.utc)
     }
     
     db.users.insert_one(user)
     
     return {
         "message": "User registered successfully",
+        "userId": user_id
+    }
+
+@app.post("/bootstrap-admin", response_model=dict)
+async def create_first_admin(user_data: UserCreate, admin_secret: str = Header(...)):
+    # Verify admin secret
+    if not ADMIN_SECRET or admin_secret != ADMIN_SECRET:
+        # Use a generic error message for security
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized"
+        )
+    
+    # Check if any admin users already exist
+    existing_admin = db.users.find_one({"role": "admin"})
+    if existing_admin:
+        raise HTTPException(
+            status_code=400, 
+            detail="Admin user already exists. This endpoint can only be used once."
+        )
+    
+    # Hash password and create admin user
+    hashed_password = get_password_hash(user_data.password)
+    
+    user_id = str(uuid.uuid4())
+    user = {
+        "userId": user_id,
+        "email": user_data.email,
+        "password": hashed_password,
+        "role": "admin",  # Force admin role regardless of what was provided
+        "createdAt": datetime.now(timezone.utc)
+    }
+    
+    db.users.insert_one(user)
+    
+    return {
+        "message": "Admin user created successfully",
         "userId": user_id
     }
 
@@ -183,14 +234,14 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     
     # Create session
     session_id = str(uuid.uuid4())
-    expires_at = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     
     session = {
         "sessionId": session_id,
         "userId": user["userId"],
         "isValid": True,
         "expiresAt": expires_at,
-        "createdAt": datetime.utcnow()
+        "createdAt": datetime.now(timezone.utc)
     }
     
     db.sessions.insert_one(session)
