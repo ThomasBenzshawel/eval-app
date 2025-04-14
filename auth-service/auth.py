@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
 import uuid
+from typing import Dict, List
 from dotenv import load_dotenv
 from fastapi import Header
 
@@ -56,7 +57,7 @@ class User(UserBase):
     createdAt: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True 
 
 class SessionBase(BaseModel):
     userId: str
@@ -280,6 +281,114 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
         "email": current_user["email"],
         "role": current_user["role"]
     }
+
+@app.get("/users/{user_id}", response_model=dict)
+async def get_user(user_id: str, admin_user: dict = Depends(check_admin_user)):
+    # Only admins can access user details
+    user = db.users.find_one({"userId": user_id}, {"password": 0})  # Exclude password
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Convert ObjectId to string for JSON serialization
+    if "_id" in user:
+        user["_id"] = str(user["_id"])
+    
+    return user
+
+@app.get("/users", response_model=Dict[str, List[dict]])
+async def get_users(admin_user: dict = Depends(check_admin_user)):
+    # Only admins can see the user list
+    users = list(db.users.find({}, {"password": 0}))  # Exclude passwords
+    
+    # Convert ObjectId to string for JSON serialization
+    for user in users:
+        if "_id" in user:
+            user["_id"] = str(user["_id"])
+    
+    return {"data": users}
+
+
+@app.put("/register/{user_id}", response_model=dict)
+async def update_user(user_id: str, user_data: dict, admin_user: dict = Depends(check_admin_user)):
+    # Check if user exists
+    existing_user = db.users.find_one({"userId": user_id})
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if this is the last admin
+    if existing_user["role"] == "admin" and user_data.get("role") != "admin":
+        admin_count = db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot change role of the last admin user"
+            )
+    
+    # Prepare update data
+    update_data = {}
+    
+    # Update email if provided
+    if "email" in user_data:
+        # Check if email already exists for another user
+        email_user = db.users.find_one({"email": user_data["email"], "userId": {"$ne": user_id}})
+        if email_user:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        update_data["email"] = user_data["email"]
+    
+    # Update role if provided
+    if "role" in user_data:
+        if user_data["role"] not in ["user", "admin"]:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        update_data["role"] = user_data["role"]
+    
+    # Update password if provided
+    if "password" in user_data and user_data["password"]:
+        update_data["password"] = get_password_hash(user_data["password"])
+    
+    # Update user
+    if update_data:
+        result = db.users.update_one(
+            {"userId": user_id},
+            {"$set": update_data}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=400, detail="Failed to update user")
+    
+    return {"message": "User updated successfully"}
+
+@app.delete("/register/{user_id}", response_model=dict)
+async def delete_user(user_id: str, admin_user: dict = Depends(check_admin_user)):
+    # Make sure it's not the last admin
+    if admin_user["userId"] == user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete your own account"
+        )
+    
+    # Check if this is the last admin
+    user_to_delete = db.users.find_one({"userId": user_id})
+    if not user_to_delete:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if user_to_delete["role"] == "admin":
+        admin_count = db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete the last admin account"
+            )
+    
+    # Delete the user
+    result = db.users.delete_one({"userId": user_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Also delete any sessions for this user
+    db.sessions.delete_many({"userId": user_id})
+    
+    return {"message": "User deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,19 +1,21 @@
 import os
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Header
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+import datetime as dt
 from datetime import datetime
 import httpx
 import uuid
 import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables
 load_dotenv()
-
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:4000")
 app = FastAPI(title="Objaverse API")
 
 # CORS Middleware
@@ -65,32 +67,54 @@ class Object3DUpdate(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     metadata: Optional[Metadata] = None
+class Rating(BaseModel):
+    userId: str
+    score: int  # 1-5 rating
+    comment: Optional[str] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(dt.timezone.utc))
+
+class Assignment(BaseModel):
+    userId: str
+    assignedAt: datetime = Field(default_factory=lambda: datetime.now(dt.timezone.utc))
+    completedAt: Optional[datetime] = None
+
+class Object3DBase(BaseModel):
+    description: str
+    category: str
+    metadata: Optional[Metadata] = None
+    assignments: List[Assignment] = []  
 
 class Object3D(Object3DBase):
     objectId: str
     images: List[Image] = []
+    ratings: List[Rating] = []
+    averageRating: Optional[float] = None
     createdAt: datetime
     updatedAt: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True 
 
 # Authentication dependency
 async def get_current_user(authorization: str = Header(None)):
     if not authorization:
+        logging.error("No authorization header provided")
         raise HTTPException(status_code=401, detail="Authentication required")
     
     try:
-        # Call auth service
+        # Call auth service with more detailed logging
+        logging.info(f"Validating token with auth service at {AUTH_SERVICE_URL}/me")
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                "http://objaverse-auth-service:4000/me",
+                f"{AUTH_SERVICE_URL}/me",
                 headers={"Authorization": authorization}
             )
             if response.status_code != 200:
+                logging.error(f"Auth service returned status code {response.status_code}: {response.text}")
                 raise HTTPException(status_code=401, detail="Invalid or expired token")
             return response.json()
     except Exception as e:
+        logging.error(f"Exception during auth validation: {str(e)}")
         raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
 
 # Routes
@@ -164,8 +188,8 @@ async def create_object(object_data: Object3DCreate, user=Depends(get_current_us
         raise HTTPException(status_code=400, detail="Object with this ID already exists")
     
     # Create object document
-    now = datetime.utcnow()
-    object_dict = object_data.dict()
+    now = datetime.now(dt.timezone.utc)
+    object_dict = object_data
     object_dict.update({
         "images": [],
         "createdAt": now,
@@ -191,10 +215,10 @@ async def update_object(object_id: str, object_data: Object3DUpdate, user=Depend
         raise HTTPException(status_code=404, detail="Object not found")
     
     # Update fields if provided
-    update_data = {k: v for k, v in object_data.dict(exclude_unset=True).items() if v is not None}
+    update_data = {k: v for k, v in object_data.model_dump(exclude_unset=True).items() if v is not None}
     
     if update_data:
-        update_data["updatedAt"] = datetime.utcnow()
+        update_data["updatedAt"] = datetime.now(dt.timezone.utc)
         db.objects.update_one({"objectId": object_id}, {"$set": update_data})
     
     # Get updated object
@@ -271,7 +295,7 @@ async def upload_image(
             {"objectId": object_id},
             {
                 "$push": {"images": image},
-                "$set": {"updatedAt": datetime.utcnow()}
+                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
             }
         )
         
@@ -303,6 +327,465 @@ async def search_objects(query: str, user=Depends(get_current_user)):
         "count": len(objects),
         "data": objects
     }
+
+@app.post("/api/objects/{object_id}/batch-images", response_model=Dict[str, Any])
+async def upload_multiple_images(
+    object_id: str, 
+    files: List[UploadFile] = File(...),
+    angles: Optional[List[str]] = None,
+    user=Depends(get_current_user)
+):
+    """
+    Upload multiple images for a 3D object at once.
+    Optionally provide a list of angles corresponding to each image.
+    """
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Set default angles if not provided
+    if not angles:
+        angles = ["unspecified"] * len(files)
+    elif len(angles) != len(files):
+        raise HTTPException(status_code=400, detail="Number of angles must match number of files")
+    
+    uploaded_images = []
+    
+    # Upload each image to Cloudinary
+    for i, file in enumerate(files):
+        try:
+            contents = await file.read()
+            upload_result = cloudinary.uploader.upload(
+                contents,
+                folder=f"objaverse/{object_id}",  # Organize by object ID
+                transformation=[{"width": 500, "height": 500, "crop": "limit"}]
+            )
+            
+            # Create image record
+            image = {
+                "imageId": upload_result["public_id"],
+                "url": upload_result["secure_url"],
+                "angle": angles[i]
+            }
+            
+            uploaded_images.append(image)
+            
+        except Exception as e:
+            # Continue with other uploads even if one fails
+            logging.error(f"Failed to upload image {i}: {str(e)}")
+    
+    # Add all successful uploads to the object
+    if uploaded_images:
+        db.objects.update_one(
+            {"objectId": object_id},
+            {
+                "$push": {"images": {"$each": uploaded_images}},
+                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+            }
+        )
+    
+    return {
+        "success": True,
+        "count": len(uploaded_images),
+        "data": uploaded_images
+    }
+
+
+@app.post("/api/objects/{object_id}/rate", response_model=Dict[str, Any])
+async def rate_object_description(
+    object_id: str,
+    rating_data: Dict[str, Any] = Body(...),
+    user=Depends(get_current_user)
+):
+    """Rate an object's description"""
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Validate rating
+    if "score" not in rating_data or not isinstance(rating_data["score"], int) or not (1 <= rating_data["score"] <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be an integer between 1 and 5")
+    
+    # Create rating document
+    rating = {
+        "userId": user["userId"],
+        "score": rating_data["score"],
+        "timestamp": datetime.now(dt.timezone.utc)
+    }
+    
+    # Add comment if provided
+    if "comment" in rating_data:
+        rating["comment"] = rating_data["comment"]
+    
+    # Check if user has already rated this object
+    existing_rating = next((r for r in obj.get("ratings", []) if r.get("userId") == user["userId"]), None)
+    
+    if existing_rating:
+        # Update existing rating
+        db.objects.update_one(
+            {"objectId": object_id, "ratings.userId": user["userId"]},
+            {
+                "$set": {
+                    "ratings.$": rating,
+                    "updatedAt": datetime.now(dt.timezone.utc)
+                }
+            }
+        )
+    else:
+        # Add new rating
+        db.objects.update_one(
+            {"objectId": object_id},
+            {
+                "$push": {"ratings": rating},
+                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+            }
+        )
+    
+    # Mark assignment as completed
+    db.objects.update_one(
+        {"objectId": object_id, "assignments.userId": user["userId"]},
+        {
+            "$set": {
+                "assignments.$.completedAt": datetime.now(dt.timezone.utc)
+            }
+        }
+    )
+    
+    # Update average rating
+    updated_obj = db.objects.find_one({"objectId": object_id})
+    ratings = updated_obj.get("ratings", [])
+    
+    if ratings:
+        avg_rating = sum(r["score"] for r in ratings) / len(ratings)
+        db.objects.update_one(
+            {"objectId": object_id},
+            {"$set": {"averageRating": round(avg_rating, 2)}}
+        )
+    
+    return {
+        "success": True,
+        "message": "Rating submitted successfully",
+        "data": rating
+    }
+
+@app.post("/api/bulk-assign", response_model=Dict[str, Any])
+async def bulk_assign_objects(
+    assignments: List[Dict[str, str]] = Body(...),
+    user=Depends(get_current_user)
+):
+    """Bulk assign objects to users for evaluation"""
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    for assignment in assignments:
+        if "objectId" not in assignment or "userId" not in assignment:
+            results["failed"].append({
+                "assignment": assignment,
+                "reason": "Missing objectId or userId"
+            })
+            continue
+        
+        object_id = assignment["objectId"]
+        user_id = assignment["userId"]
+        
+        # Check if object exists
+        obj = db.objects.find_one({"objectId": object_id})
+        if not obj:
+            results["failed"].append({
+                "assignment": assignment,
+                "reason": "Object not found"
+            })
+            continue
+        
+        # Check if user is already assigned
+        already_assigned = db.objects.find_one({
+            "objectId": object_id,
+            "assignments.userId": user_id
+        })
+        
+        if already_assigned:
+            results["success"].append(assignment)
+            continue
+        
+        # Add assignment
+        try:
+            db.objects.update_one(
+                {"objectId": object_id},
+                {
+                    "$push": {
+                        "assignments": {
+                            "userId": user_id,
+                            "assignedAt": datetime.now(dt.timezone.utc)
+                        }
+                    },
+                    "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+                }
+            )
+            results["success"].append(assignment)
+        except Exception as e:
+            results["failed"].append({
+                "assignment": assignment,
+                "reason": str(e)
+            })
+    
+    return {
+        "success": True,
+        "successful_count": len(results["success"]),
+        "failed_count": len(results["failed"]),
+        "data": results
+    }
+
+
+@app.post("/api/objects/{object_id}/assign", response_model=Dict[str, Any])
+async def assign_object_to_user(
+    object_id: str,
+    userId: str = Body(...),
+    user=Depends(get_current_user)
+):
+    """Assign an object to a user for evaluation"""
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Check if user is already assigned
+    already_assigned = db.objects.find_one({
+        "objectId": object_id,
+        "assignments.userId": userId
+    })
+    
+    if already_assigned:
+        return {
+            "success": True,
+            "message": f"Object {object_id} already assigned to user {userId}"
+        }
+    
+    # Add user to assignments array
+    assignment = {
+        "userId": userId,
+        "assignedAt": datetime.now(dt.timezone.utc)
+    }
+    
+    db.objects.update_one(
+        {"objectId": object_id},
+        {
+            "$push": {"assignments": assignment},
+            "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+        }
+    )
+    
+    return {
+        "success": True,
+        "message": f"Object {object_id} assigned to user {userId}"
+    }
+
+
+@app.get("/api/assignments", response_model=Dict[str, Any])
+async def get_user_assignments(
+    userId: str,
+    page: int = 1,
+    limit: int = 10,
+    user=Depends(get_current_user)
+):
+    """Get objects assigned to a specific user that haven't been rated yet"""
+    skip = (page - 1) * limit
+    
+    # Query objects assigned to this user that don't have ratings from this user
+    query = {
+        "assignments.userId": userId,
+        "$or": [
+            # Either no ratings array exists
+            {"ratings": {"$exists": False}},
+            # Or no rating from this user exists
+            {"ratings": {"$not": {"$elemMatch": {"userId": userId}}}}
+        ]
+    }
+    
+    objects = list(db.objects.find(query).skip(skip).limit(limit))
+    total = db.objects.count_documents(query)
+    
+    # Convert ObjectId to string for JSON serialization
+    for obj in objects:
+        obj["_id"] = str(obj["_id"])
+    
+    return {
+        "success": True,
+        "count": len(objects),
+        "total": total,
+        "page": page,
+        "pages": (total + limit - 1) // limit,
+        "data": objects
+    }
+
+@app.post("/api/completed", response_model=Dict[str, Any])
+async def get_completed_evaluations(
+    request_data: Dict[str, str],
+    page: int = 1,
+    limit: int = 10,
+    user=Depends(get_current_user)
+):
+    """Get objects that have been rated by the specified user"""
+    userId = request_data.get("userId")
+    if not userId:
+        raise HTTPException(status_code=400, detail="userId is required")
+    
+    skip = (page - 1) * limit
+    
+    # Query objects that have ratings from this user
+    query = {
+        "assignments.userId": userId,
+        "ratings": {"$elemMatch": {"userId": userId}}
+    }
+    
+    objects = list(db.objects.find(query).skip(skip).limit(limit))
+    total = db.objects.count_documents(query)
+    
+    # Convert ObjectId to string for JSON serialization
+    for obj in objects:
+        obj["_id"] = str(obj["_id"])
+        
+        # Mark assignment as completed if not already
+        for assignment in obj.get("assignments", []):
+            if assignment.get("userId") == userId and not assignment.get("completedAt"):
+                db.objects.update_one(
+                    {
+                        "objectId": obj["objectId"], 
+                        "assignments.userId": userId
+                    },
+                    {
+                        "$set": {
+                            "assignments.$.completedAt": datetime.now(dt.timezone.utc)
+                        }
+                    }
+                )
+    
+    return {
+        "success": True,
+        "count": len(objects),
+        "total": total,
+        "page": page,
+        "pages": (total + limit - 1) // limit,
+        "data": objects
+    }
+
+@app.get("/api/completed/{object_id}", response_model=Dict[str, Any])
+async def get_completed_evaluation(
+    object_id: str,
+    user=Depends(get_current_user)
+):
+    """Get details for a specific rated object"""
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Convert ObjectId to string for JSON serialization
+    obj["_id"] = str(obj["_id"])
+    
+    # Extract the user's rating if it exists
+    if "ratings" in obj:
+        user_rating = next((r for r in obj["ratings"] if r.get("userId") == user["userId"]), None)
+        if user_rating:
+            obj["userRating"] = user_rating
+    
+    return {
+        "success": True,
+        "data": obj
+    }
+
+@app.post("/api/objects/{object_id}/rate", response_model=Dict[str, Any])
+async def rate_object_description(
+    object_id: str,
+    rating_data: Dict[str, Any] = Body(...),
+    user=Depends(get_current_user)
+):
+    """Rate an object's description"""
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Validate rating
+    if "score" not in rating_data or not isinstance(rating_data["score"], int) or not (1 <= rating_data["score"] <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be an integer between 1 and 5")
+    
+    # Create rating document
+    rating = {
+        "userId": user["userId"],
+        "score": rating_data["score"],
+        "timestamp": datetime.now(dt.timezone.utc)
+    }
+    
+    # Add comment if provided
+    if "comment" in rating_data:
+        rating["comment"] = rating_data["comment"]
+    
+    # Check if user has already rated this object
+    existing_rating = next((r for r in obj.get("ratings", []) if r.get("userId") == user["userId"]), None)
+    
+    if existing_rating:
+        # Update existing rating
+        db.objects.update_one(
+            {"objectId": object_id, "ratings.userId": user["userId"]},
+            {
+                "$set": {
+                    "ratings.$": rating,
+                    "updatedAt": datetime.now(dt.timezone.utc)
+                }
+            }
+        )
+    else:
+        # Add new rating
+        db.objects.update_one(
+            {"objectId": object_id},
+            {
+                "$push": {"ratings": rating},
+                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+            }
+        )
+    
+    # Update average rating
+    updated_obj = db.objects.find_one({"objectId": object_id})
+    ratings = updated_obj.get("ratings", [])
+    
+    if ratings:
+        avg_rating = sum(r["score"] for r in ratings) / len(ratings)
+        db.objects.update_one(
+            {"objectId": object_id},
+            {"$set": {"averageRating": round(avg_rating, 2)}}
+        )
+    
+    return {
+        "success": True,
+        "message": "Rating submitted successfully",
+        "data": rating
+    }
+
+@app.get("/api/objects/{object_id}/ratings", response_model=Dict[str, Any])
+async def get_object_ratings(object_id: str, user=Depends(get_current_user)):
+    """Get all ratings for an object"""
+    obj = db.objects.find_one({"objectId": object_id})
+    
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    ratings = obj.get("ratings", [])
+    avg_rating = obj.get("averageRating")
+    
+    return {
+        "success": True,
+        "data": {
+            "ratings": ratings,
+            "averageRating": avg_rating,
+            "count": len(ratings)
+        }
+    }
+
+
 
 if __name__ == "__main__":
     import uvicorn
