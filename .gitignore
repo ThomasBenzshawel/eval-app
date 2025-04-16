@@ -4,3 +4,4 @@ auth-service/.env
 web-service/.env
 auth-service/secret_gen.py
 mongodb_data/
+.env

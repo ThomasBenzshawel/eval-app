@@ -1,31 +1,13 @@
 services:
-  # MongoDB service (for local development)
-  mongodb:
-    image: mongo:latest
-    container_name: objaverse-mongodb
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=password
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-      - ./mongodb_data:/data/db  
-    networks:
-      - objaverse-network
-
   # Authentication service
   auth-service:
     build:
       context: ./auth-service
       dockerfile: Dockerfile
     container_name: objaverse-auth
-    depends_on:
-      - mongodb
     environment:
       - PORT=4000
-      - MONGO_URI=mongodb://admin:password@mongodb:27017/objaverse-auth?authSource=admin
-      - JWT_SECRET=your-secure-random-jwt-secret
+      - JWT_SECRET=${JWT_SECRET}
     ports:
       - "4000:4000"
     volumes:
@@ -42,15 +24,16 @@ services:
       dockerfile: Dockerfile
     container_name: objaverse-web
     depends_on:
-      - mongodb
       - auth-service
     environment:
       - PORT=3000
-      - MONGO_URI=mongodb://admin:password@mongodb:27017/objaverse?authSource=admin
       - AUTH_SERVICE_URL=http://auth-service:4000
-      - CLOUDINARY_CLOUD_NAME=objaverse-kedziora
-      - CLOUDINARY_API_KEY=316816699942876
-      - CLOUDINARY_API_SECRET=h9-WpLDzxJNjlOx0ldlwSjQLytk
+      - JWT_SECRET=${JWT_SECRET}
+      - MONGO_URI=${MONGO_URI}
+      - DATABASE=${DATABASE}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+      - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
+      - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
     ports:
       - "3000:3000"
     volumes:
@@ -73,7 +56,7 @@ services:
       - PORT=8000
       - API_URL=http://web-service:3000
       - AUTH_URL=http://auth-service:4000
-      - JWT_SECRET=your-secure-random-jwt-secret
+      - JWT_SECRET=${JWT_SECRET}
     ports:
       - "8000:8000"
     volumes:
@@ -86,6 +69,3 @@ services:
 networks:
   objaverse-network:
     driver: bridge
-
-volumes:
-  mongodb_data:

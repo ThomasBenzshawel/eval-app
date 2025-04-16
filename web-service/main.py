@@ -264,32 +264,32 @@ async def delete_object(object_id: str, user=Depends(get_current_user)):
 
 @app.post("/api/objects/{object_id}/images", response_model=Dict[str, Any])
 async def upload_image(
-    object_id: str, 
-    file: UploadFile = File(...), 
-    angle: str = "front",
-    user=Depends(get_current_user)
+    object_id: str,
+    file: UploadFile = File(...),
+    angle: str = "front"
 ):
     obj = db.objects.find_one({"objectId": object_id})
-    
+   
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
-    
+   
     # Upload to Cloudinary
     try:
         contents = await file.read()
         upload_result = cloudinary.uploader.upload(
             contents,
             folder="objaverse",
-            transformation=[{"width": 500, "height": 500, "crop": "limit"}]
+            transformation=[{"width": 500, "height": 500, "crop": "limit"}],
+            overwrite=True # Overwrite existing images with the same public ID
         )
-        
+       
         # Create image record
         image = {
             "imageId": upload_result["public_id"],
             "url": upload_result["secure_url"],
             "angle": angle
         }
-        
+       
         # Add image to object
         db.objects.update_one(
             {"objectId": object_id},
@@ -298,13 +298,14 @@ async def upload_image(
                 "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
             }
         )
-        
+       
         return {
             "success": True,
             "data": image
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+    
 
 @app.get("/api/search", response_model=Dict[str, Any])
 async def search_objects(query: str, user=Depends(get_current_user)):
@@ -560,9 +561,10 @@ async def assign_object_to_user(
     
     if already_assigned:
         return {
-            "success": True,
+            "success": False,
             "message": f"Object {object_id} already assigned to user {userId}"
         }
+    
     
     # Add user to assignments array
     assignment = {
@@ -594,13 +596,10 @@ async def get_user_assignments(
     """Get objects assigned to a specific user that haven't been rated yet"""
     skip = (page - 1) * limit
     
-    # Query objects assigned to this user that don't have ratings from this user
     query = {
         "assignments.userId": userId,
         "$or": [
-            # Either no ratings array exists
             {"ratings": {"$exists": False}},
-            # Or no rating from this user exists
             {"ratings": {"$not": {"$elemMatch": {"userId": userId}}}}
         ]
     }
@@ -608,9 +607,27 @@ async def get_user_assignments(
     objects = list(db.objects.find(query).skip(skip).limit(limit))
     total = db.objects.count_documents(query)
     
-    # Convert ObjectId to string for JSON serialization
+    # Process each object to ensure proper image URLs
     for obj in objects:
         obj["_id"] = str(obj["_id"])
+
+        # Ensure images property exists
+        if "images" not in obj or not obj["images"]:
+            # Create a default Cloudinary URL using the object ID
+            object_id = obj["objectId"]
+            default_image = {
+                "imageId": f"objaverse/{object_id}",
+                "url": f"https://res.cloudinary.com/objaverse-kedziora/image/upload/objects/{object_id}/{object_id}_{object_id}_front.jpg",
+                "angle": "front"
+            }
+            obj["images"] = [default_image]
+        else:
+            # Ensure each image has the correct Cloudinary URL format
+            for img in obj["images"]:
+                if "url" not in img or not img["url"].startswith("https://res.cloudinary.com"):
+                    object_id = obj["objectId"]
+                    img_id = img.get("imageId", f"{object_id}_{object_id}_front")
+                    img["url"] = f"https://res.cloudinary.com/objaverse-kedziora/image/upload/objects/{object_id}/{img_id}.jpg"
     
     return {
         "success": True,
@@ -620,6 +637,72 @@ async def get_user_assignments(
         "pages": (total + limit - 1) // limit,
         "data": objects
     }
+
+@app.post("/api/assignments", response_model=Dict[str, Any])
+async def assign_objects_to_users(
+    assignment: Dict[str, str] = Body(...),  # Changed from List to Dict
+    user=Depends(get_current_user)
+):
+    # Wrap the single assignment in a list #TODO MAKE THIS ACTUALLY A ONE ITEM INPUT
+    assignments = [assignment]
+
+    """Assign multiple objects to users"""
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    for assignment in assignments:
+        object_id = assignment["objectId"]
+        user_id = assignment["userId"]
+        
+        # Check if object exists
+        obj = db.objects.find_one({"objectId": object_id})
+        if not obj:
+            results["failed"].append({
+                "assignment": assignment,
+                "reason": "Object not found"
+            })
+            continue
+        
+        # Check if user is already assigned
+        already_assigned = db.objects.find_one({
+            "objectId": object_id,
+            "assignments.userId": user_id
+        })
+        
+        if already_assigned:
+            results["success"].append(assignment)
+            continue
+        
+        # Add assignment
+        try:
+            db.objects.update_one(
+                {"objectId": object_id},
+                {
+                    "$push": {
+                        "assignments": {
+                            "userId": user_id,
+                            "assignedAt": datetime.now(dt.timezone.utc)
+                        }
+                    },
+                    "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+                }
+            )
+            results["success"].append(assignment)
+        except Exception as e:
+            results["failed"].append({
+                "assignment": assignment,
+                "reason": str(e)
+            })
+    
+    return {
+        "success": True,
+        "successful_count": len(results["success"]),
+        "failed_count": len(results["failed"]),
+        "data": results
+    }
+
 
 @app.post("/api/completed", response_model=Dict[str, Any])
 async def get_completed_evaluations(
