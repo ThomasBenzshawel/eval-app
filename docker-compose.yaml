@@ -1,47 +1,47 @@
 services:
   # Authentication service
-  auth-service:
-    build:
-      context: ./auth-service
-      dockerfile: Dockerfile
-    container_name: objaverse-auth
-    environment:
-      - PORT=4000
-      - JWT_SECRET=${JWT_SECRET}
-    ports:
-      - "4000:4000"
-    volumes:
-      - ./auth-service:/app
-      - /app/node_modules
-    networks:
-      - objaverse-network
-    restart: unless-stopped
+  # auth-service:
+  #   build:
+  #     context: ./auth-service
+  #     dockerfile: Dockerfile
+  #   container_name: objaverse-auth
+  #   environment:
+  #     - PORT=4000
+  #     - JWT_SECRET=${JWT_SECRET}
+  #   ports:
+  #     - "4000:4000"
+  #   volumes:
+  #     - ./auth-service:/app
+  #     - /app/node_modules
+  #   networks:
+  #     - objaverse-network
+  #   restart: unless-stopped
 
   # Web API service
-  web-service:
-    build:
-      context: ./web-service
-      dockerfile: Dockerfile
-    container_name: objaverse-web
-    depends_on:
-      - auth-service
-    environment:
-      - PORT=3000
-      - AUTH_SERVICE_URL=http://auth-service:4000
-      - JWT_SECRET=${JWT_SECRET}
-      - MONGO_URI=${MONGO_URI}
-      - DATABASE=${DATABASE}
-      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
-      - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
-      - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./web-service:/app
-      - /app/node_modules
-    networks:
-      - objaverse-network
-    restart: unless-stopped
+  # web-service:
+  #   build:
+  #     context: ./web-service
+  #     dockerfile: Dockerfile
+  #   container_name: objaverse-web
+  #   depends_on:
+  #     - auth-service
+  #   environment:
+  #     - PORT=3000
+  #     - AUTH_SERVICE_URL=http://auth-service:4000
+  #     - JWT_SECRET=${JWT_SECRET}
+  #     - MONGO_URI=${MONGO_URI}
+  #     - DATABASE=${DATABASE}
+  #     - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+  #     - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
+  #     - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - ./web-service:/app
+  #     - /app/node_modules
+  #   networks:
+  #     - objaverse-network
+  #   restart: unless-stopped
 
   # Evaluator portal frontend
   evaluator_portal:
@@ -49,13 +49,13 @@ services:
       context: ./evaluator_portal
       dockerfile: Dockerfile
     container_name: objaverse-portal
-    depends_on:
-      - web-service
-      - auth-service
+    # depends_on:
+      # - web-service
+      # - auth-service
     environment:
       - PORT=8000
-      - API_URL=http://web-service:3000
-      - AUTH_URL=http://auth-service:4000
+      - API_URL=${WEB_SERVICE_URL}
+      - AUTH_URL=${AUTH_SERVICE_URL}
       - JWT_SECRET=${JWT_SECRET}
     ports:
       - "8000:8000"
