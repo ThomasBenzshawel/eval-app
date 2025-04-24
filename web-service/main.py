@@ -393,84 +393,6 @@ async def upload_multiple_images(
     }
 
 
-@app.post("/api/objects/{object_id}/rate", response_model=Dict[str, Any])
-async def rate_object_description(
-    object_id: str,
-    rating_data: Dict[str, Any] = Body(...),
-    user=Depends(get_current_user)
-):
-    """Rate an object's description"""
-    obj = db.objects.find_one({"objectId": object_id})
-    
-    if not obj:
-        raise HTTPException(status_code=404, detail="Object not found")
-    
-    # Validate rating
-    if "score" not in rating_data or not isinstance(rating_data["score"], int) or not (1 <= rating_data["score"] <= 5):
-        raise HTTPException(status_code=400, detail="Rating must be an integer between 1 and 5")
-    
-    # Create rating document
-    rating = {
-        "userId": user["userId"],
-        "score": rating_data["score"],
-        "timestamp": datetime.now(dt.timezone.utc)
-    }
-    
-    # Add comment if provided
-    if "comment" in rating_data:
-        rating["comment"] = rating_data["comment"]
-    
-    # Check if user has already rated this object
-    existing_rating = next((r for r in obj.get("ratings", []) if r.get("userId") == user["userId"]), None)
-    
-    if existing_rating:
-        # Update existing rating
-        db.objects.update_one(
-            {"objectId": object_id, "ratings.userId": user["userId"]},
-            {
-                "$set": {
-                    "ratings.$": rating,
-                    "updatedAt": datetime.now(dt.timezone.utc)
-                }
-            }
-        )
-    else:
-        # Add new rating
-        db.objects.update_one(
-            {"objectId": object_id},
-            {
-                "$push": {"ratings": rating},
-                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
-            }
-        )
-    
-    # Mark assignment as completed
-    db.objects.update_one(
-        {"objectId": object_id, "assignments.userId": user["userId"]},
-        {
-            "$set": {
-                "assignments.$.completedAt": datetime.now(dt.timezone.utc)
-            }
-        }
-    )
-    
-    # Update average rating
-    updated_obj = db.objects.find_one({"objectId": object_id})
-    ratings = updated_obj.get("ratings", [])
-    
-    if ratings:
-        avg_rating = sum(r["score"] for r in ratings) / len(ratings)
-        db.objects.update_one(
-            {"objectId": object_id},
-            {"$set": {"averageRating": round(avg_rating, 2)}}
-        )
-    
-    return {
-        "success": True,
-        "message": "Rating submitted successfully",
-        "data": rating
-    }
-
 @app.post("/api/bulk-assign", response_model=Dict[str, Any])
 async def bulk_assign_objects(
     assignments: List[Dict[str, str]] = Body(...),
@@ -703,7 +625,6 @@ async def assign_objects_to_users(
         "data": results
     }
 
-
 @app.post("/api/completed", response_model=Dict[str, Any])
 async def get_completed_evaluations(
     request_data: Dict[str, str],
@@ -711,32 +632,40 @@ async def get_completed_evaluations(
     limit: int = 10,
     user=Depends(get_current_user)
 ):
-    """Get objects that have been rated by the specified user"""
+    """Get objects that have been rated by the specified user with all required metrics"""
     userId = request_data.get("userId")
     if not userId:
         raise HTTPException(status_code=400, detail="userId is required")
-    
+   
     skip = (page - 1) * limit
-    
-    # Query objects that have ratings from this user
+   
+    # Query objects that have been rated by this user with all three metrics
+    # The new structure has all metrics as fields in a single rating document
     query = {
         "assignments.userId": userId,
-        "ratings": {"$elemMatch": {"userId": userId}}
+        "ratings": {
+            "$elemMatch": {
+                "userId": userId,
+                "accuracy": {"$exists": True},
+                "completeness": {"$exists": True},
+                "clarity": {"$exists": True}
+            }
+        }
     }
-    
+   
     objects = list(db.objects.find(query).skip(skip).limit(limit))
     total = db.objects.count_documents(query)
-    
-    # Convert ObjectId to string for JSON serialization
+   
+    # Process each object
     for obj in objects:
         obj["_id"] = str(obj["_id"])
-        
+       
         # Mark assignment as completed if not already
         for assignment in obj.get("assignments", []):
             if assignment.get("userId") == userId and not assignment.get("completedAt"):
                 db.objects.update_one(
                     {
-                        "objectId": obj["objectId"], 
+                        "objectId": obj["objectId"],
                         "assignments.userId": userId
                     },
                     {
@@ -745,7 +674,26 @@ async def get_completed_evaluations(
                         }
                     }
                 )
-    
+        
+        # Extract user's ratings from the single rating document
+        user_ratings = {
+            "accuracy": 0,
+            "completeness": 0, 
+            "clarity": 0
+        }
+        
+        # Find this user's rating document
+        for rating in obj.get("ratings", []):
+            if rating.get("userId") == userId:
+                # Extract metrics from the rating document
+                user_ratings["accuracy"] = rating.get("accuracy", rating.get("score", 0))
+                user_ratings["completeness"] = rating.get("completeness", 0)
+                user_ratings["clarity"] = rating.get("clarity", 0)
+                break
+        
+        # Add user's ratings to the object for easier access in templates
+        obj["user_ratings"] = user_ratings
+   
     return {
         "success": True,
         "count": len(objects),
@@ -754,6 +702,7 @@ async def get_completed_evaluations(
         "pages": (total + limit - 1) // limit,
         "data": objects
     }
+
 
 @app.get("/api/completed/{object_id}", response_model=Dict[str, Any])
 async def get_completed_evaluation(
@@ -787,26 +736,81 @@ async def rate_object_description(
     user=Depends(get_current_user)
 ):
     """Rate an object's description"""
+
+    # log the rating data so that it can be seen in digital ocean logs
+    logging.info(f"Rating data: {rating_data}")
+    print(f"Rating data: {rating_data}")
     obj = db.objects.find_one({"objectId": object_id})
-    
+   
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
-    
-    # Validate rating
-    if "score" not in rating_data or not isinstance(rating_data["score"], int) or not (1 <= rating_data["score"] <= 5):
+   
+    # Check for unknown object flag in metrics
+    is_unknown_object = False
+    if "metrics" in rating_data and rating_data.get("metrics", {}).get("unknown_object", False):
+        is_unknown_object = True
+   
+    # Validate rating (skip validation for unknown objects)
+    if not is_unknown_object and ("score" not in rating_data or not isinstance(rating_data["score"], int) or not (1 <= rating_data["score"] <= 5)):
         raise HTTPException(status_code=400, detail="Rating must be an integer between 1 and 5")
     
+    # Get additional metrics if available
+    metrics = rating_data.get("metrics", {})
+    
+    # Create a list to store all the rating entries
+    now = datetime.now(dt.timezone.utc)
+    
+    # Create the primary rating entry (for backward compatibility)
+    primary_rating = {
+   
     # Create rating document
     rating = {
         "userId": user["userId"],
         "score": rating_data["score"],
-        "timestamp": datetime.now(dt.timezone.utc)
+        "timestamp": now
     }
-    
+   
+    # Store metrics if provided
+    if "metrics" in rating_data:
+        rating["metrics"] = rating_data["metrics"]
+   
     # Add comment if provided
+    if "comment" in rating_data and rating_data["comment"]:
+        primary_rating["comment"] = rating_data["comment"]
+    
+    # Add metrics as separate fields in the primary rating
+    if metrics:
+        for metric_name, metric_value in metrics.items():
+            if isinstance(metric_value, int) and 1 <= metric_value <= 5:
+                primary_rating[metric_name] = metric_value
+    
+    # Remove existing ratings from this user
+    db.objects.update_one(
+        {"objectId": object_id},
+        {"$pull": {"ratings": {"userId": user["userId"]}}}
+    )
+    
+    # Add the new rating
+    db.objects.update_one(
+        {"objectId": object_id},
+        {
+            "$push": {"ratings": primary_rating},
+            "$set": {"updatedAt": now}
+        }
+    )
+    
+    # Mark assignment as completed
+    db.objects.update_one(
+        {"objectId": object_id, "assignments.userId": user["userId"]},
+        {
+            "$set": {
+                "assignments.$.completedAt": now
+            }
+        }
+    )
     if "comment" in rating_data:
         rating["comment"] = rating_data["comment"]
-    
+
     # Check if user has already rated this object
     existing_rating = next((r for r in obj.get("ratings", []) if r.get("userId") == user["userId"]), None)
     
@@ -831,21 +835,38 @@ async def rate_object_description(
             }
         )
     
-    # Update average rating
+    # Update average ratings
     updated_obj = db.objects.find_one({"objectId": object_id})
     ratings = updated_obj.get("ratings", [])
     
     if ratings:
-        avg_rating = sum(r["score"] for r in ratings) / len(ratings)
+        # Calculate overall average
+        all_scores = [r["score"] for r in ratings]
+        avg_rating = round(sum(all_scores) / len(all_scores), 2)
+        
+        # Calculate averages for each metric if available
+        avg_ratings = {"overall": avg_rating}
+        
+        # Check if we have metric-specific ratings
+        metric_names = ["accuracy", "completeness", "clarity"]
+        for metric in metric_names:
+            metric_scores = [r.get(metric, r["score"]) for r in ratings if metric in r or "score" in r]
+            if metric_scores:
+                avg_ratings[metric] = round(sum(metric_scores) / len(metric_scores), 2)
+        
+        # Update in database
         db.objects.update_one(
             {"objectId": object_id},
-            {"$set": {"averageRating": round(avg_rating, 2)}}
+            {"$set": {
+                "averageRatings": avg_ratings,
+                "averageRating": avg_rating
+            }}
         )
     
     return {
         "success": True,
         "message": "Rating submitted successfully",
-        "data": rating
+        "data": primary_rating
     }
 
 @app.get("/api/objects/{object_id}/ratings", response_model=Dict[str, Any])
@@ -872,4 +893,4 @@ async def get_object_ratings(object_id: str, user=Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 3000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 3000)), log_level="info", workers=4)

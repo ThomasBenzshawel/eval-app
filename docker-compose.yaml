@@ -54,8 +54,8 @@ services:
       # - auth-service
     environment:
       - PORT=8000
-      - API_URL=${WEB_SERVICE_URL}
-      - AUTH_URL=${AUTH_SERVICE_URL}
+      - API_URL=${API_URL}
+      - AUTH_URL=${AUTH_URL}
       - JWT_SECRET=${JWT_SECRET}
     ports:
       - "8000:8000"

@@ -392,4 +392,4 @@ async def delete_user(user_id: str, admin_user: dict = Depends(check_admin_user)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 4000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 4000)), log_level="info", workers=4)
