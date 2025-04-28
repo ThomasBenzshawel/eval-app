@@ -639,16 +639,27 @@ async def get_completed_evaluations(
    
     skip = (page - 1) * limit
    
-    # Query objects that have been rated by this user with all three metrics
-    # The new structure has all metrics as fields in a single rating document
+    # Modified query to include both standard ratings and unknown objects
     query = {
         "assignments.userId": userId,
         "ratings": {
             "$elemMatch": {
                 "userId": userId,
-                "accuracy": {"$exists": True},
-                "completeness": {"$exists": True},
-                "clarity": {"$exists": True}
+                "$or": [
+                    # Standard ratings with accuracy and completeness
+                    {
+                        "accuracy": {"$exists": True},
+                        "completeness": {"$exists": True}
+                    },
+                    # Unknown objects
+                    {
+                        "metrics.unknown_object": True
+                    },
+                    # Legacy format or partial evaluations (just to be safe)
+                    {
+                        "score": {"$exists": True}
+                    }
+                ]
             }
         }
     }
@@ -682,18 +693,33 @@ async def get_completed_evaluations(
             "clarity": 0
         }
         
+        is_unknown_object = False
+        
         # Find this user's rating document
         for rating in obj.get("ratings", []):
             if rating.get("userId") == userId:
-                # Extract metrics from the rating document
-                user_ratings["accuracy"] = rating.get("accuracy", rating.get("score", 0))
-                user_ratings["completeness"] = rating.get("completeness", 0)
-                user_ratings["clarity"] = rating.get("clarity", 0)
+                # Check if this is an unknown object
+                if rating.get("metrics", {}).get("unknown_object", False):
+                    is_unknown_object = True
+                    # Set default values for unknown objects
+                    user_ratings = {
+                        "accuracy": 0,
+                        "completeness": 0,
+                        "clarity": 0
+                    }
+                else:
+                    # Extract metrics from the rating document
+                    user_ratings["accuracy"] = rating.get("accuracy", rating.get("score", 0))
+                    user_ratings["completeness"] = rating.get("completeness", 0)
+                    user_ratings["clarity"] = rating.get("clarity", 0)
                 break
         
         # Add user's ratings to the object for easier access in templates
         obj["user_ratings"] = user_ratings
-   
+        obj["is_unknown_object"] = is_unknown_object
+
+    
+    print(f"Completed evaluations: {len(objects)}")
     return {
         "success": True,
         "count": len(objects),
@@ -737,11 +763,11 @@ async def rate_object_description(
 ):
     """Rate an object's description"""
 
-    # log the rating data so that it can be seen in digital ocean logs
+    # Log the rating data for debugging
     logging.info(f"Rating data: {rating_data}")
-    print(f"Rating data: {rating_data}")
+    
+    # Check if object exists
     obj = db.objects.find_one({"objectId": object_id})
-   
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
    
@@ -757,14 +783,9 @@ async def rate_object_description(
     # Get additional metrics if available
     metrics = rating_data.get("metrics", {})
     
-    # Create a list to store all the rating entries
+    # Create the rating document
     now = datetime.now(dt.timezone.utc)
-    
-    # Create the primary rating entry (for backward compatibility)
     primary_rating = {
-   
-    # Create rating document
-    rating = {
         "userId": user["userId"],
         "score": rating_data["score"],
         "timestamp": now
@@ -772,7 +793,7 @@ async def rate_object_description(
    
     # Store metrics if provided
     if "metrics" in rating_data:
-        rating["metrics"] = rating_data["metrics"]
+        primary_rating["metrics"] = rating_data["metrics"]
    
     # Add comment if provided
     if "comment" in rating_data and rating_data["comment"]:
@@ -781,16 +802,16 @@ async def rate_object_description(
     # Add metrics as separate fields in the primary rating
     if metrics:
         for metric_name, metric_value in metrics.items():
-            if isinstance(metric_value, int) and 1 <= metric_value <= 5:
+            if isinstance(metric_value, (int, bool)) or metric_name == "unknown_object":
                 primary_rating[metric_name] = metric_value
     
-    # Remove existing ratings from this user
+    # First remove any existing rating from this user
     db.objects.update_one(
         {"objectId": object_id},
         {"$pull": {"ratings": {"userId": user["userId"]}}}
     )
     
-    # Add the new rating
+    # Then add the new rating in a separate operation
     db.objects.update_one(
         {"objectId": object_id},
         {
@@ -808,32 +829,6 @@ async def rate_object_description(
             }
         }
     )
-    if "comment" in rating_data:
-        rating["comment"] = rating_data["comment"]
-
-    # Check if user has already rated this object
-    existing_rating = next((r for r in obj.get("ratings", []) if r.get("userId") == user["userId"]), None)
-    
-    if existing_rating:
-        # Update existing rating
-        db.objects.update_one(
-            {"objectId": object_id, "ratings.userId": user["userId"]},
-            {
-                "$set": {
-                    "ratings.$": rating,
-                    "updatedAt": datetime.now(dt.timezone.utc)
-                }
-            }
-        )
-    else:
-        # Add new rating
-        db.objects.update_one(
-            {"objectId": object_id},
-            {
-                "$push": {"ratings": rating},
-                "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
-            }
-        )
     
     # Update average ratings
     updated_obj = db.objects.find_one({"objectId": object_id})
@@ -888,6 +883,81 @@ async def get_object_ratings(object_id: str, user=Depends(get_current_user)):
             "count": len(ratings)
         }
     }
+
+@app.delete("/api/ratings/{object_id}/{user_id}", response_model=Dict[str, Any])
+async def delete_rating(
+    object_id: str,
+    user_id: str,
+    user=Depends(get_current_user)
+):
+    """Delete a specific user's rating for an object"""
+    # Check if user is admin
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete ratings")
+    
+    # Check if object exists
+    obj = db.objects.find_one({"objectId": object_id})
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    
+    # Check if rating exists
+    ratings = obj.get("ratings", [])
+    rating_exists = any(r.get("userId") == user_id for r in ratings)
+    
+    if not rating_exists:
+        raise HTTPException(status_code=404, detail=f"No rating found for user {user_id}")
+    
+    # Remove the rating
+    db.objects.update_one(
+        {"objectId": object_id},
+        {
+            "$pull": {"ratings": {"userId": user_id}},
+            "$set": {"updatedAt": datetime.now(dt.timezone.utc)}
+        }
+    )
+    
+    # Update average ratings
+    updated_obj = db.objects.find_one({"objectId": object_id})
+    updated_ratings = updated_obj.get("ratings", [])
+    
+    if updated_ratings:
+        # Calculate overall average
+        all_scores = [r["score"] for r in updated_ratings if "score" in r]
+        avg_rating = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
+        
+        # Calculate averages for each metric if available
+        avg_ratings = {"overall": avg_rating}
+        
+        # Check if we have metric-specific ratings
+        metric_names = ["accuracy", "completeness", "clarity"]
+        for metric in metric_names:
+            metric_scores = [r.get(metric, r["score"]) for r in updated_ratings if metric in r or "score" in r]
+            if metric_scores:
+                avg_ratings[metric] = round(sum(metric_scores) / len(metric_scores), 2)
+        
+        # Update in database
+        db.objects.update_one(
+            {"objectId": object_id},
+            {"$set": {
+                "averageRatings": avg_ratings,
+                "averageRating": avg_rating
+            }}
+        )
+    else:
+        # No ratings left, remove averages
+        db.objects.update_one(
+            {"objectId": object_id},
+            {"$unset": {
+                "averageRatings": "",
+                "averageRating": ""
+            }}
+        )
+    
+    return {
+        "success": True,
+        "message": f"Rating for user {user_id} deleted successfully",
+    }
+
 
 
 
