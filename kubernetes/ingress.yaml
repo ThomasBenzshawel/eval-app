@@ -4,14 +4,9 @@ metadata:
   name: objaverse-ingress
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
-  tls:
-  - hosts:
-    - api.objaverse-example.com
-    secretName: objaverse-tls
   rules:
-  - host: api.objaverse-example.com
+  - host: api.159.89.216.26.nip.io
     http:
       paths:
       - path: /
@@ -21,3 +16,23 @@ spec:
             name: objaverse-web-service
             port:
               number: 80
+  - host: auth.159.89.216.26.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: objaverse-auth-service
+            port:
+              number: 4000
+  - host: portal.159.89.216.26.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: objaverse-portal-service
+            port:
+              number: 8000
