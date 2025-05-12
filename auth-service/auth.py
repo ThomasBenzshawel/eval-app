@@ -22,7 +22,7 @@ app = FastAPI(title="Auth Service")
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For production, specify allowed origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,7 +47,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # Pydantic Models
 class UserBase(BaseModel):
     email: str
-    role: str = "researcher"  # Default role or can be set to "admin"
+    role: str = "researcher"
 
 class UserCreate(UserBase):
     password: str
@@ -177,6 +177,7 @@ async def register(user_data: UserCreate, admin_user: dict = Depends(check_admin
         "userId": user_id
     }
 
+# this can only be used once to create the first admin user
 @app.post("/bootstrap-admin", response_model=dict)
 async def create_first_admin(user_data: UserCreate, admin_secret: str = Header(...)):
     # Verify admin secret

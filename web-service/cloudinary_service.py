@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# this is used in uploading images to cloudinary
 class CloudinaryService:
     """Service class for Cloudinary operations"""
     
@@ -147,7 +148,6 @@ class CloudinaryService:
             Tuple of (folder, public_id)
         """
         try:
-            # Example URL: https://res.cloudinary.com/demo/image/upload/v1612345678/objaverse/sample.jpg
             parts = url.split('/')
             if 'upload' in parts:
                 upload_index = parts.index('upload')
@@ -177,10 +177,8 @@ class CloudinaryService:
             logger.error(f"Failed to extract public ID from URL: {str(e)}")
             raise
 
-# Create a singleton instance
 cloudinary_service = CloudinaryService()
 
-# Example usage
 if __name__ == "__main__":
     # Test the service
     try:

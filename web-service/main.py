@@ -21,7 +21,7 @@ app = FastAPI(title="Objaverse API")
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For production, specify allowed origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -392,7 +392,7 @@ async def upload_multiple_images(
         "data": uploaded_images
     }
 
-
+# used for bulk assignment of objects to users
 @app.post("/api/bulk-assign", response_model=Dict[str, Any])
 async def bulk_assign_objects(
     assignments: List[Dict[str, str]] = Body(...),
@@ -639,7 +639,7 @@ async def get_completed_evaluations(
    
     skip = (page - 1) * limit
    
-    # Modified query to include both standard ratings and unknown objects
+    # query to include both standard ratings and unknown objects
     query = {
         "assignments.userId": userId,
         "ratings": {
@@ -655,7 +655,7 @@ async def get_completed_evaluations(
                     {
                         "metrics.unknown_object": True
                     },
-                    # Legacy format or partial evaluations (just to be safe)
+                    # deprecated format or partial evaluations
                     {
                         "score": {"$exists": True}
                     }

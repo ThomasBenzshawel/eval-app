@@ -3,6 +3,8 @@ import csv
 from typing import List, Dict, Any, Set
 from collections import Counter
 
+# Requested format from Dr. K for how to assign objects to users
+
 def read_csv_column(file_path: str, column_name: str = None, column_index: int = 0) -> List[Any]:
     """
     Read a column from a CSV file.
@@ -162,7 +164,6 @@ def assign_objects_with_universal_crossover(
                 crossover_matrix[user2][user1] += 1
     
     # Phase 4: Distribute remaining objects to achieve target crossover percentage
-    # Calculate how many more shared objects each user needs
     for user in users:
         current_shared = 0
         for other_user in users:
@@ -336,7 +337,6 @@ def main(
         print(f"Error in assignment process: {e}")
         raise
 
-# Example usage with CSV files
 if __name__ == "__main__":
     import argparse
     
@@ -363,6 +363,5 @@ if __name__ == "__main__":
         args.crossover_pct
     )
 
-    # Example usage:
-    # python assign_objects.py --users-csv users.csv --users-column user_id --objects-csv objects.csv --objects-column object_id --output-csv assignments.csv --assignment-pct 0.3 --crossover-pct 0.2
+    # Usage:
     # or python assign_objects.py --users-csv users.csv --objects-csv objects.csv --output-csv assignments.csv
